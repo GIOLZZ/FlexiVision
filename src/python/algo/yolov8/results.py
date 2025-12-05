@@ -1,11 +1,12 @@
 import numpy as np
-from dataclasses import dataclass
+# from dataclasses import dataclass
 
 
-@dataclass
+# @dataclass
 class YoloDeceteResults:
     """Yolo检测结果"""
-    boxes: list[list[int]] = []
-    clss: list[int] = []
-    confs: list[float] = []
-    masks: list[np.ndarray] = []
+    def __init__(self):
+        self.boxes: list[list[int]] = []
+        self.clss: list[int] = []
+        self.confs: list[float] = []
+        self.masks: list[np.ndarray] = []

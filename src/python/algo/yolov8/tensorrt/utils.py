@@ -10,7 +10,7 @@ def letterbox(im: np.ndarray, new_shape=(640, 640), color=(114, 114, 114), scale
         im: 图像
         new_shape: 输出图像的形状
         color: 填充颜色
-        scaleFill: 是否填充整个输出图像
+        scaleFill: 是否拉伸填充图像
         scaleup: 是否允许放大
 
     Returns: 处理后的图像, 缩放比例, 填充尺寸
@@ -62,7 +62,7 @@ def preprocess(origin_img: np.ndarray, input_size=(640, 640)):
         raise FileNotFoundError(f"图像错误: {origin_img}")
     
     # Letterbox缩放
-    img, ratio, pad = letterbox(origin_img, new_shape=input_size, auto=False, stride=32)
+    img, ratio, pad = letterbox(origin_img, new_shape=input_size)
     
     img = img[:, :, ::-1]
     img = img.astype(np.float32) / 255.0
