@@ -3,10 +3,12 @@ import numpy as np
 
 
 # @dataclass
-class YoloDeceteResults:
+class YoloDetectResults:
     """Yolo检测结果"""
     def __init__(self):
         self.boxes: list[list[int]] = []
         self.clss: list[int] = []
         self.confs: list[float] = []
         self.masks: list[np.ndarray] = []
+        self.keypoints: list[list[int, float]] = []
+        self.xyxyxyxy: list[list[int]] = []

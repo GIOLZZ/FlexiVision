@@ -2,11 +2,10 @@ import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
 import numpy as np
-import time
 
 from algo.yolov8.enums import ModelTask
-from algo.yolov8.results import YoloDeceteResults
-from algo.yolov8.tensorrt.utils import preprocess, postprocess_det
+from algo.yolov8.results import YoloDetectResults
+from algo.yolov8.tensorrt.utils import preprocess, postprocess_det, postprocess_seg
 
 
 class Yolov8Trt:
@@ -14,8 +13,8 @@ class Yolov8Trt:
     def __init__(self, engine_path :str, task :ModelTask, max_batch_size :int=1):
         """
         Args:
-            engine_path (str): 引擎文件路径
-            task (ModelTask): 模型任务. 目前只支持'detect'
+            engine_path (str): path
+            task (ModelTask): 模型任务. 目前支持'detect' 'segment'
             max_batch_size (int, optional): 最大批量大小. Defaults to 1. 目前只支持batch_size=1时
         """
         self.engine_path = engine_path
@@ -28,7 +27,7 @@ class Yolov8Trt:
         # 选择后处理函数, 目前只支持'detect'
         postprocess_map = {
             ModelTask.DET: postprocess_det,
-            ModelTask.SEG: postprocess_det,
+            ModelTask.SEG: postprocess_seg,
             ModelTask.POSE: postprocess_det,
             ModelTask.OBB: postprocess_det
         }
@@ -48,26 +47,31 @@ class Yolov8Trt:
         for i in range(self.engine.num_io_tensors):
             tensor_name = self.engine.get_tensor_name(i)
             tensor_shape = self.engine.get_tensor_shape(tensor_name)
+            if i == 0:
+                self.input_shape = tensor_shape
+
             tensor_dtype = self.engine.get_tensor_dtype(tensor_name)
             tensor_mode = self.engine.get_tensor_mode(tensor_name)
             print(f"  I/O {i}: {tensor_name}, shape={tensor_shape}, dtype={tensor_dtype}, mode={tensor_mode}")
 
-    def detect(self, image, iou=0.45, conf=0.25) -> YoloDeceteResults:
+        self.detect(np.zeros((640, 640, 3), dtype=np.uint8))
+
+    def detect(self, image: np.ndarray, conf: float=0.25, iou: float=0.45) -> YoloDetectResults:
         """检测"""
         # 预处理
-        input_tensor, origin_img, ratio, pad = preprocess(image)
+        input_tensor, origin_img, ratio, pad = preprocess(image, input_size=self.input_shape[2:])
 
         # 推理
         outputs = self._infer([input_tensor])
 
         # 后处理
         detections = self.postprocess(
-            outputs[0],
+            outputs,
+            orig_shape=origin_img.shape[:2],
             conf_thres=conf,
             iou_thres=iou,
             ratio=ratio,
-            pad=pad,
-            orig_shape=origin_img.shape
+            pad=pad
         )
 
         return detections
@@ -199,3 +203,23 @@ class Yolov8Trt:
         """清理资源"""
         if hasattr(self, 'stream'):
             self.stream.synchronize()
+
+if __name__ == '__main__':
+    import cv2
+
+    yolo_trt = Yolov8Trt("/home/cc/FlexiVision/models/person_head_v8s_1007.engine", ModelTask.DET)
+
+    cap = cv2.VideoCapture("/home/cc/FlexiVision/887832848-1-208.mp4")
+    while True:
+        ret, image = cap.read()
+        if not ret:
+            break
+        
+        results = yolo_trt.detect(image)
+        for box in results.boxes:
+            cv2.rectangle(image, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 2)
+
+        img_show = cv2.resize(image, (720, 480))
+        cv2.imshow("result", img_show)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break

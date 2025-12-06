@@ -1,6 +1,9 @@
+import math
+import time
 import numpy as np
 import cv2
-from algo.yolov8.results import YoloDeceteResults
+
+from algo.yolov8.results import YoloDetectResults
 
 
 def letterbox(im: np.ndarray, new_shape=(640, 640), color=(114, 114, 114), scaleFill=False, scaleup=False):
@@ -71,28 +74,99 @@ def preprocess(origin_img: np.ndarray, input_size=(640, 640)):
     
     return img, origin_img, ratio, pad
 
-def postprocess_det(outputs: np.ndarray, conf_thres=0.25, iou_thres=0.45, ratio=1.0, pad=(0, 0), orig_shape=None) -> YoloDeceteResults:
+def xywh2xyxy(x):
+    y = np.zeros_like(x)
+    y[:, 0] = x[:, 0] - x[:, 2] / 2
+    y[:, 1] = x[:, 1] - x[:, 3] / 2
+    y[:, 2] = x[:, 0] + x[:, 2] / 2
+    y[:, 3] = x[:, 1] + x[:, 3] / 2
+
+    return y
+
+def nms(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float):
+    """
+    NMS
+    Args:
+        boxes (numpy.ndarray): 框坐标
+        scores (numpy.ndarray): 框得分
+        iou_threshold (float): iou阈值
+
+    Returns:
+        keep_boxes (numpy.ndarray): 保留的框索引
+    """
+    sorted_indices = np.argsort(scores)[::-1]
+
+    keep_boxes = []
+    while sorted_indices.size > 0:
+        box_id = sorted_indices[0]
+        keep_boxes.append(box_id)
+
+        ious = compute_iou(boxes[box_id, :], boxes[sorted_indices[1:], :])
+
+        keep_indices = np.where(ious < iou_threshold)[0]
+
+        sorted_indices = sorted_indices[keep_indices + 1]
+
+    return keep_boxes
+
+def compute_iou(box, boxes):
+    xmin = np.maximum(box[0], boxes[:, 0])
+    ymin = np.maximum(box[1], boxes[:, 1])
+    xmax = np.minimum(box[2], boxes[:, 2])
+    ymax = np.minimum(box[3], boxes[:, 3])
+
+    intersection_area = np.maximum(0, xmax - xmin) * np.maximum(0, ymax - ymin)
+
+    box_area = (box[2] - box[0]) * (box[3] - box[1])
+    boxes_area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    union_area = box_area + boxes_area - intersection_area
+
+    iou = intersection_area / union_area
+
+    return iou
+
+def extract_orig_box(box, pad, ratio, orig_shape):
+    """
+    将box缩放到原始图像尺寸
+    Args:
+        box: 模型输出box坐标
+        ratio: 预处理缩放比例
+        pad: 填充尺寸 (dw, dh)
+        orig_shape: 原始图像形状
+    """
+    # 缩放到原始图像尺寸
+    x1, y1, x2, y2 = box
+    x1 = (x1 - pad[0]) / ratio
+    y1 = (y1 - pad[1]) / ratio
+    x2 = (x2 - pad[0]) / ratio
+    y2 = (y2 - pad[1]) / ratio
+    # 限制图像边界内
+    x1 = max(0, min(x1, orig_shape[1]))
+    y1 = max(0, min(y1, orig_shape[0]))
+    x2 = max(0, min(x2, orig_shape[1]))
+    y2 = max(0, min(y2, orig_shape[0]))
+
+    orig_box = [int(x1), int(y1), int(x2), int(y2)]
+
+    return orig_box
+
+def postprocess_det(outputs: np.ndarray, orig_shape, conf_thres=0.25, iou_thres=0.45, ratio=1.0, pad=(0, 0)) -> YoloDetectResults:
     """
     YOLOv8Det输出后处理
     
     Args:
         outputs: 推理输出
+        orig_shape: 原始图像形状 (height, width)
         conf_thres: 置信度阈值
         iou_thres: NMS IoU阈值
         ratio: 预处理缩放比例
         pad: 填充尺寸 (dw, dh)
-        orig_shape: 原始图像形状 (height, width)
-    
-    Returns:
-        list: 检测结果列表
-    """
-    # 解析输出形状
-    if len(outputs.shape) == 4:
-        outputs = outputs.squeeze()
-    if len(outputs.shape) == 3:
-        outputs = outputs[0]
 
-    predictions = outputs.T
+    Returns:
+        YoloDetectResults: 结果
+    """
+    outputs = outputs[0]
+    predictions = np.squeeze(outputs).T
     
     boxes = predictions[:, :4]  # 边界框
     scores = predictions[:, 4:]  # 类别置信度
@@ -108,50 +182,152 @@ def postprocess_det(outputs: np.ndarray, conf_thres=0.25, iou_thres=0.45, ratio=
     class_ids = class_ids[mask]
     
     if len(boxes) == 0:
-        return []
+        return YoloDetectResults()
     
-    # (cx, cy, w, h) to (x1, y1, x2, y2)
-    boxes_xyxy = np.zeros_like(boxes)
-    boxes_xyxy[:, 0] = boxes[:, 0] - boxes[:, 2] / 2
-    boxes_xyxy[:, 1] = boxes[:, 1] - boxes[:, 3] / 2
-    boxes_xyxy[:, 2] = boxes[:, 0] + boxes[:, 2] / 2
-    boxes_xyxy[:, 3] = boxes[:, 1] + boxes[:, 3] / 2
+    boxes_xyxy = xywh2xyxy(boxes)
     
     # NMS
-    indices = cv2.dnn.NMSBoxes(
-        boxes_xyxy.tolist(),
-        confidences.tolist(),
-        conf_thres,
-        iou_thres
-    )
+    indices = nms(boxes_xyxy, confidences, iou_thres)
     
     # 获取结果
-    detect_results = YoloDeceteResults()
+    orig_boxes = []
     for i in indices:
-        box = boxes_xyxy[i]
-        conf = confidences[i]
-        cls_id = class_ids[i]
-        
-        # 缩放到原始图像尺寸
-        x1, y1, x2, y2 = box
-        x1 = (x1 - pad[0]) / ratio
-        y1 = (y1 - pad[1]) / ratio
-        x2 = (x2 - pad[0]) / ratio
-        y2 = (y2 - pad[1]) / ratio
-        
-        # 限制图像边界内
-        if orig_shape is not None:
-            height, width = orig_shape[:2]
-            x1 = max(0, min(x1, width))
-            y1 = max(0, min(y1, height))
-            x2 = max(0, min(x2, width))
-            y2 = max(0, min(y2, height))
-        
-        detect_results.boxes.append([int(x1), int(y1), int(x2), int(y2)])
-        detect_results.clss.append(cls_id)
-        detect_results.confs.append(conf)
-    
-    detect_results.masks = None
+        orig_box = extract_orig_box(boxes_xyxy[i], pad, ratio, orig_shape)
+        orig_boxes.append(orig_box)
+
+    detect_results = YoloDetectResults()
+    detect_results.boxes = orig_boxes
+    detect_results.clss = class_ids[indices].tolist()
+    detect_results.confs = confidences[indices].tolist()
     
     return detect_results
+
+def postprocess_seg(outputs: np.ndarray, orig_shape, conf_thres=0.25, iou_thres=0.45, ratio=1.0, pad=(0, 0)) -> YoloDetectResults:
+    """
+    YOLOv8Seg输出后处理
+    
+    Args:
+        outputs: 推理输出
+        orig_shape: 原始图像形状 (height, width)
+        conf_thres: 置信度阈值
+        iou_thres: NMS IoU阈值
+        ratio: 预处理缩放比例
+        pad: 填充尺寸 (dw, dh)
+
+    Returns:
+        YoloDetectResults: 结果
+    """
+    outputs0 = outputs[0]
+    outputs1 = outputs[1]
+
+    proto = outputs1[0] # 原型掩码，用于生成分割掩码
+    nm = proto.shape[0] # 掩码系数数量
+    nc = outputs0.shape[1] - 4 - 1 - nm # 类别数量
+    
+    predictions = np.squeeze(outputs0).T
+
+    # conf过滤
+    scores = np.max(predictions[:, 4:5+nc], axis=1)
+    predictions = predictions[scores > conf_thres, :]
+    confidences = scores[scores > conf_thres]
+
+    if len(confidences) == 0:
+        return YoloDetectResults()
+
+    mask_predictions = predictions[..., nc+5:]
+    box_predictions = predictions[..., :nc+5]
+    boxes = box_predictions[:, :4]
+    class_ids = np.argmax(box_predictions[:, 4:], axis=1)
+
+    # 2xyxy
+    boxes_xyxy = xywh2xyxy(boxes)
+
+    # NMS
+    indices = nms(boxes_xyxy, confidences, iou_thres)
+
+    orig_boxes = []
+    for i in indices:
+        orig_box = extract_orig_box(boxes_xyxy[i], pad, ratio, orig_shape)
+        orig_boxes.append(orig_box)
+
+    detect_results = YoloDetectResults()
+    detect_results.boxes = orig_boxes
+    detect_results.clss = class_ids[indices].tolist()
+    detect_results.confs = confidences[indices].tolist()
+
+    mask_pred = mask_predictions[indices]
+
+    # 处理速度待优化
+    detect_results.masks = process_mask_output(mask_pred, outputs1, np.array(detect_results.boxes), orig_shape, (640, 640), ratio, pad)
+
+    return detect_results
+
+def process_mask_output(mask_predictions, mask_output, boxes, orig_shape, input_shape, ratio, pad):
+    """
+    Args:
+        mask_predictions:
+        mask_output: 模型mask输出
+        boxes: boxes
+        orig_shape: 原始图像形状
+        input_shape: 输入图像形状
+        ratio: 预处理缩放比例
+        pad: 填充尺寸 (dw, dh)
+    Returns:
+        list[np.ndarray]: 原图像尺寸mask列表
+    """
+    if mask_predictions.shape[0] == 0:
+        return []
+
+    mask_output = np.squeeze(mask_output)
+    num_mask, mh, mw = mask_output.shape  # CHW
+
+    # (N, num_mask) × (num_mask, mh*mw) => (N, mh*mw)
+    masks = sigmoid(mask_predictions @ mask_output.reshape(num_mask, -1))
+    masks = masks.reshape((-1, mh, mw))
+    
+    input_h, input_w = input_shape
+    
+    # 计算从输入图到Mask原型的缩放
+    proto_r = min(mh / input_h, mw / input_w)
+    
+    # 计算在Mask原型空间中的完整pad
+    dw, dh = pad
+    pad_w_proto = dw * proto_r
+    pad_h_proto = dh * proto_r
+    
+    # 缩放边界框并添加pad
+    scale_boxes = boxes * (ratio * proto_r)
+    scale_boxes[:, [0, 2]] += pad_w_proto  # x1, x2
+    scale_boxes[:, [1, 3]] += pad_h_proto  # y1, y2
+    
+    mask_maps = np.zeros((len(scale_boxes), orig_shape[0], orig_shape[1]), dtype=np.uint8)
+
+    for i in range(len(scale_boxes)):
+        x1s, y1s, x2s, y2s = scale_boxes[i]
+        x1, y1, x2, y2 = boxes[i]
+
+        x1s, y1s = int(x1s), int(y1s)
+        x2s, y2s = int(x2s), int(y2s)
+        x1, y1 = int(x1), int(y1)
+        x2, y2 = int(x2), int(y2)
+
+        # 裁剪 mask
+        scale_crop_mask = masks[i][y1s:y2s, x1s:x2s]
+
+        crop_mask = cv2.resize(
+            scale_crop_mask,
+            (x2 - x1, y2 - y1),
+            interpolation=cv2.INTER_LINEAR
+        )
+
+        # 二值化
+        crop_mask = (crop_mask > 0.5)
+
+        mask_maps[i, y1:y2, x1:x2] = crop_mask
+
+    return mask_maps
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
 

@@ -3,10 +3,16 @@ from enum import Enum
 
 class DevicePlatform(Enum):
     """推理平台"""
-    CPU = 'cpu'
-    CUDA = 'cuda'
+    TORCH = 'torch'
+    TENSORRT = 'tensorrt'
     ASCEND = 'ascend'
     RKNN = 'rknn'
+
+
+class TorchDevice(Enum):
+    """torch平台 推理设备"""
+    CUDA = 'cuda'
+    CPU = 'cpu'
 
 
 class ModelTask(Enum):

@@ -1,7 +1,7 @@
 import numpy as np
 from ultralytics import YOLO
 
-from algo.yolov8.results import YoloDeceteResults
+from algo.yolov8.results import YoloDetectResults
 from utils.utils import scale_image
 
 
@@ -10,7 +10,7 @@ class DetectionPredictor:
         self.model = model
         self.device = device
 
-    def predict(self, image: np.ndarray, conf: float=0.25, iou: float=0.1) -> YoloDeceteResults:
+    def predict(self, image: np.ndarray, conf: float=0.25, iou: float=0.1) -> YoloDetectResults:
         """
         Args:
             image (np.ndarray): 输入图像
@@ -18,15 +18,14 @@ class DetectionPredictor:
             iou (float, optional): iou. Defaults to 0.1.
         
         Returns:
-            YoloDeceteResults: 检测结果
+            YoloDetectResults: 检测结果
         """
-        detect_results = YoloDeceteResults()
+        detect_results = YoloDetectResults()
 
         results = self.model(image, conf=conf, iou=iou, verbose=False, device=self.device)
         detect_results.boxes = results[0].boxes.xyxy.int().tolist()
         detect_results.clss = results[0].boxes.cls.int().tolist()
         detect_results.confs = results[0].boxes.conf.tolist()
-        detect_results.masks = None
 
         return detect_results
 
@@ -36,7 +35,7 @@ class SegmentationPredictor:
         self.model = model
         self.device = device
 
-    def predict(self, image: np.ndarray, conf: float=0.25, iou: float=0.1) -> YoloDeceteResults:
+    def predict(self, image: np.ndarray, conf: float=0.25, iou: float=0.1) -> YoloDetectResults:
         """
         Args:
             image (np.ndarray): 输入图像
@@ -44,13 +43,14 @@ class SegmentationPredictor:
             iou (float, optional): iou. Defaults to 0.1.
         
         Returns:
-            YoloDeceteResults: 检测结果
+            YoloDetectResults: 检测结果
         """
-        detect_results = YoloDeceteResults()
+        detect_results = YoloDetectResults()
 
         results = self.model(image, conf=conf, iou=iou, verbose=False, device=self.device)
         if results[0].masks is not None:
             results_mask_data = results[0].masks.data
+            detect_results.boxes = results[0].boxes.xyxy.int().tolist()
             detect_results.clss = results[0].boxes.cls.int().tolist()
             detect_results.confs = results[0].boxes.conf.tolist()
             # 处理results_mask_data
@@ -58,7 +58,5 @@ class SegmentationPredictor:
                 mask = mask.cpu().numpy().astype(np.uint8)
                 mask_resized = scale_image(mask, image.shape)  # 将mask缩放至img相同大小，此处不能简单使用cv2.resize()
                 detect_results.masks.append(mask_resized)
-            
-        detect_results.boxes = None
     
         return detect_results
