@@ -1,0 +1,10 @@
+*.jpg
+*.png
+*.mp4
+
+*.pt
+*.onnx
+*.engine
+*.rknn
+
+*.pyc
