@@ -2,7 +2,7 @@ import numpy as np
 
 from typing import List
 from algo.yolov8.results import YoloDetectResults
-from algo.yolov8.tensorrt.utils import *
+from algo.yolov8.utils.utils import *
 
 
 def postprocess_det(

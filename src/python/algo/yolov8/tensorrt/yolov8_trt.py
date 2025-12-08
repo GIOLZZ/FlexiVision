@@ -5,8 +5,8 @@ import numpy as np
 
 from algo.yolov8.enums import ModelTask
 from algo.yolov8.results import YoloDetectResults
-from algo.yolov8.tensorrt.utils import preprocess
-from algo.yolov8.tensorrt.postprocess import postprocess_det, postprocess_seg, postprocess_obb, postprocess_pose
+from algo.yolov8.utils.utils import preprocess
+from algo.yolov8.utils.postprocess import postprocess_det, postprocess_seg, postprocess_obb, postprocess_pose
 
 
 class Yolov8Trt:

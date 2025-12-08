@@ -1,10 +1,12 @@
-import os
 import acl
 import numpy as np
 import cv2
 import time
-from .postprocessing_obb import postprocessing_obb
-from .postprocessing_seg import postprocessing_seg
+
+from algo.yolov8.enums import ModelTask
+from algo.yolov8.results import YoloDetectResults
+from algo.yolov8.utils.utils import preprocess
+from algo.yolov8.utils.postprocess import postprocess_det, postprocess_seg, postprocess_obb, postprocess_pose
 
 
 ACL_MEM_MALLOC_HUGE_FIRST = 0
@@ -12,35 +14,35 @@ ACL_MEMCPY_HOST_TO_DEVICE = 1
 ACL_MEMCPY_DEVICE_TO_HOST = 2
 
 
-def letterbox(im, new_shape=(640, 640), color=(114, 114, 114)):
-    # Resize and pad image while meeting stride-multiple constraints
-    shape = im.shape[:2]  # current shape [height, width]
-
-    # Scale ratio (new / old)
-    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
-    
-    # Compute padding
-    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))    
-    dw, dh = (new_shape[1] - new_unpad[0])/2, (new_shape[0] - new_unpad[1])/2  # wh padding 
-    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-    
-    if shape[::-1] != new_unpad:  # resize
-        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
-    im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
-
-    return im
-
-
 class YoloAscend:
-    def __init__(self, model_path, task, device_id=0):
+    def __init__(self, model_path: str, task: ModelTask, keypoint_num :int=0, device_id=0):
+        """
+        Args:
+            model_path (str): path
+            task (ModelTask): 模型任务.
+            keypoint_num (int, optional): 当时用关键点模型时, 关键点数量. Defaults to 0.
+            device_id (int, optional): 设备id. Defaults to 0.
+        """
         self.task = task
+        self.keypoint_num = keypoint_num
         self.device_id = device_id
 
-        self.imgz = None            # 输入数据大小
-        self.outputs_shape = []    # 输出数据形状
-        self.class_number = None    # 类别数量
-        self.height, self.width = None, None
+        if not isinstance(self.task, ModelTask):
+            raise ValueError("模型任务错误")
+        
+        # 选择后处理函数
+        postprocess_map = {
+            ModelTask.DET: postprocess_det,
+            ModelTask.SEG: postprocess_seg,
+            ModelTask.POSE: postprocess_pose,
+            ModelTask.OBB: postprocess_obb
+        }
+        self.postprocess = postprocess_map[self.task]
+
+        # 模型 io shape
+        self.input_shape = None
+        self.outputs_shape0 = None
+        self.outputs_shape1 = None  # seg模型有两个output
 
         # 初始化昇腾环境
         ret = acl.init()
@@ -69,56 +71,44 @@ class YoloAscend:
             print(f"get_desc 失败, code: {ret}")
 
         # 创建输入输出数据
-        self.input_dataset, self.input_data = self.prepare_dataset('input')
-        self.output_dataset, self.output_data = self.prepare_dataset('output')
+        self.input_dataset, self.input_data = self._prepare_dataset('input')
+        self.output_dataset, self.output_data = self._prepare_dataset('output')
 
-        print('输入数据大小:', self.imgz)
-        print('输出数据形状:', self.outputs_shape)
-        print('类别数量:', self.class_number)
+        print(f'模型加载成功: {model_path}')
+        print('输入数据形状:', self.input_shape)
+        print('输出数据形状:', self.outputs_shape0, self.outputs_shape1)
 
-    # 检测
-    def detect(self, img, iou=0.1, conf=0.25):
-        # if self.task not in ('obb', 'seg'):
-        #     print('检测模式错误')
-        #     return None
-
-        if img is None:
-            return None
-        
-        self.height, self.width = img.shape[:2]
-
+        self.detect(np.zeros((640, 640, 3), dtype=np.uint8))
+    
+    def detect(self, image: np.ndarray, conf: float=0.25, iou: float=0.45) -> YoloDetectResults:
+        """检测"""
         # 预处理
-        input_img = self.pretreatment(img, (self.imgz, self.imgz))
+        input_tensor, origin_img, ratio, pad = preprocess(image, input_size=self.input_shape[2:])
 
         # 推理
-        outputs = self.forward(input_img)
+        outputs = self._infer(input_tensor)
+        if self.task == ModelTask.SEG:
+            outputs[0] = outputs[0].reshape(*self.outputs_shape0)
+            outputs[1] = outputs[1].reshape(*self.outputs_shape1)
+        else:
+            outputs[0] = outputs[0].reshape(*self.outputs_shape0)
 
         # 后处理
-        if self.task == 'obb':
-            outputs = outputs[0].reshape(*self.outputs_shape[0])
-            boxes, class_ids, scores = postprocessing_obb(outputs, conf, iou, self.class_number, self.imgz, (self.width, self.height))
+        detections = self.postprocess(
+            outputs,
+            orig_shape=origin_img.shape[:2],
+            conf_thres=conf,
+            iou_thres=iou,
+            ratio=ratio,
+            pad=pad,
+            input_shape=self.input_shape[2:],
+            keypoint_num=self.keypoint_num
+        )
 
-            return {'boxs': boxes, 'classIds': class_ids, 'scores': scores}
-        elif self.task == 'seg':
-            outputs_1 = outputs[0].reshape(*self.outputs_shape[0])
-            outputs_2 = outputs[1].reshape(*self.outputs_shape[1])
-            boxes, class_ids, scores, mask_maps = postprocessing_seg([outputs_1, outputs_2], conf, iou, self.imgz, (self.width, self.height))
-
-            return {'segs': mask_maps, 'boxs': boxes, 'classIds': class_ids, 'scores': scores}
+        return detections
     
-    def pretreatment(self, image, input_shape):
-        if self.task == 'obb':
-            image_rize = letterbox(image, (self.imgz, self.imgz))
-        elif self.task == 'seg':
-            image_rize = cv2.resize(image, input_shape)
-        image_rize = cv2.cvtColor(image_rize, cv2.COLOR_BGR2RGB)
-        input = image_rize.transpose(2, 0, 1).astype(dtype=np.float32)  # HWC2CHW
-        input = input / 255.0
-        input = np.expand_dims(input, 0)
-    
-        return input
-    
-    def forward(self, input):
+    def _infer(self, input):
+        """infer"""
         # 拷贝所有输入到设备
         bytes_data = input.tobytes()
         bytes_ptr = acl.util.bytes_to_ptr(bytes_data)
@@ -150,8 +140,8 @@ class YoloAscend:
             
         return outputs
 
-    def prepare_dataset(self, io_type):
-        # 根据类型获取输入/输出数量
+    def _prepare_dataset(self, io_type):
+        """获取输入/输出数量"""
         if io_type == "input":
             io_num = acl.mdl.get_num_inputs(self.model_desc)
             get_size_func = acl.mdl.get_input_size_by_index
@@ -159,22 +149,20 @@ class YoloAscend:
             dims = acl.mdl.get_input_dims(self.model_desc, 0)
             if dims[1] != 0:
                 print(f"get_input_dims errer code: {dims[1]}")
-            self.imgz = dims[0]['dims'][-1]
+            self.input_shape = dims[0]['dims']
 
         else:
             io_num = acl.mdl.get_num_outputs(self.model_desc)
             get_size_func = acl.mdl.get_output_size_by_index
             
-            dims = acl.mdl.get_output_dims(self.model_desc, 0)
-
-            self.outputs_shape.append(dims[0]['dims'])
-            if self.task == 'obb':
-                self.class_number = dims[0]['dims'][1] - 5
-            elif self.task == 'seg':
-                self.class_number = dims[0]['dims'][1] - 36
-
-                dims = acl.mdl.get_output_dims(self.model_desc, 1)
-                self.outputs_shape.append(dims[0]['dims'])
+            if self.task == ModelTask.SEG:
+                dims0 = acl.mdl.get_output_dims(self.model_desc, 0)
+                dims1 = acl.mdl.get_output_dims(self.model_desc, 1)
+                self.outputs_shape0 = dims0[0]['dims']
+                self.outputs_shape1 = dims1[0]['dims']
+            else:
+                dims = acl.mdl.get_output_dims(self.model_desc, 0)
+                self.outputs_shape0 = dims[0]['dims']
 
         # 创建数据集
         dataset = acl.mdl.create_dataset()
@@ -195,15 +183,6 @@ class YoloAscend:
 
         return dataset, buffers
 
-
     def __del__(self):
-        # 释放资源
-        for data in self.input_data + self.output_data:
-            acl.destroy_data_buffer(data["data"])
-            acl.rt.free(data["buffer"])
-        acl.mdl.destroy_dataset(self.input_dataset)
-        acl.mdl.destroy_dataset(self.output_dataset)
-        acl.mdl.destroy_desc(self.model_desc)
-        acl.mdl.unload(self.model_id)
-        acl.rt.reset_device(self.device_id)
-        acl.finalize()
+        """释放资源"""
+        
