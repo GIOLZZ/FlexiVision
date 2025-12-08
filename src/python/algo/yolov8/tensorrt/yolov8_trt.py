@@ -27,7 +27,7 @@ class Yolov8Trt:
         if not isinstance(self.task, ModelTask):
             raise ValueError("模型任务错误")
         
-        # 选择后处理函数, 目前只支持'detect'
+        # 选择后处理函数
         postprocess_map = {
             ModelTask.DET: postprocess_det,
             ModelTask.SEG: postprocess_seg,
